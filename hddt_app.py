@@ -29,6 +29,8 @@ BASE = "https://hoadondientu.gdt.gov.vn"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILE_DIR = os.path.join(APP_DIR, "pw_profile")
 SECRET_FILE = os.path.join(APP_DIR, "secret.mem")
+VERSION = "1.0.0"                      # phiên bản app (tự cập nhật từ GitHub)
+UPDATE_REPO = "kalice-vi/hddt-downloader"   # repo nguồn tự cập nhật
 MAX_WORKERS = 4          # số file tải song song tối đa
 BATCH_CONC = 8           # số export gửi ĐỒNG THỜI trong 1 lô web (pipelining)
 MAX_SIZE = 50            # số dòng tối đa server trả mỗi query
@@ -397,6 +399,28 @@ class HDDTClient:
             return [(0, None, "Hết thời gian chờ server") for _ in urls]
         return [(x.get("status", 0), x.get("b64"), x.get("err")) for x in r]
 
+    def render_pdf(self, html_path, pdf_path, timeout_ms=45000):
+        """In 1 file HTML (hóa đơn) thành PDF. Dùng Chromium headless riêng vì
+        page.pdf() chỉ chạy ở headless. Trả về pdf_path nếu thành công."""
+        import urllib.parse as _up
+        url = "file:///" + _up.quote(html_path.replace("\\", "/"))
+        browser = None
+        try:
+            browser = self.pw.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+            # chờ render ảnh/font
+            page.wait_for_timeout(900)
+            page.pdf(path=pdf_path, format="A4", print_background=True)
+            page.close()
+            if not os.path.exists(pdf_path):
+                raise RuntimeError("PDF không được tạo")
+            return pdf_path
+        finally:
+            if browser is not None:
+                try: browser.close()
+                except Exception: pass
+
 
 # ---------------- GUI ----------------
 class App:
@@ -470,11 +494,18 @@ class App:
         self.v_folder = tk.StringVar()
         ttk.Entry(t, textvariable=self.v_folder, width=40).grid(row=4, column=1, columnspan=3, sticky="we", padx=6)
         ttk.Button(t, text="Chọn...", command=self.on_pick_folder).grid(row=4, column=4)
-        self.v_only_xml = tk.BooleanVar(value=False)
-        ttk.Checkbutton(t, text="Chỉ lấy file XML (tự extract, đổi tên, xóa zip)", variable=self.v_only_xml).grid(
-            row=5, column=1, columnspan=3, sticky="w")
+        ttk.Label(t, text="Định dạng xuất:").grid(row=5, column=0, sticky="w", pady=4)
+        self.v_mode = tk.StringVar(value="zip")   # zip | xml | pdf
+        ttk.Radiobutton(t, text="ZIP (mặc định)", variable=self.v_mode, value="zip").grid(
+            row=5, column=1, sticky="w", padx=6)
+        ttk.Radiobutton(t, text="In hóa đơn thành PDF", variable=self.v_mode, value="pdf").grid(
+            row=5, column=2, sticky="w", padx=6)
+        ttk.Radiobutton(t, text="Chỉ XML", variable=self.v_mode, value="xml").grid(
+            row=5, column=3, sticky="w", padx=6)
         self.btn_start = ttk.Button(self.fr_dl, text="Bắt đầu tải", command=self.on_start)
         self.btn_start.pack(anchor="w", padx=8, pady=6)
+        self.btn_update = ttk.Button(self.fr_dl, text="Cập nhật từ Git (v%s)" % VERSION, command=self.on_update)
+        self.btn_update.pack(anchor="w", padx=8, pady=(0, 6))
 
         # ---- status table + note ----
         lf = ttk.LabelFrame(root, text="3. Trạng thái tải (bảng)")
@@ -530,6 +561,44 @@ class App:
         d = filedialog.askdirectory()
         if d:
             self.v_folder.set(d)
+
+    # ---------------- tự cập nhật từ git ----------------
+    def _update_files(self):
+        """Tải hddt_app.py + hddt.bat mới từ GitHub về, backup bản cũ."""
+        import urllib.request
+        base = "https://raw.githubusercontent.com/%s/main" % UPDATE_REPO
+        for fname in ("hddt_app.py", "hddt.bat"):
+            try:
+                req = urllib.request.Request(base + "/" + fname, headers={"User-Agent": "Mozilla/5.0"})
+                data = urllib.request.urlopen(req, timeout=30).read()
+                src = os.path.join(APP_DIR, fname)
+                if os.path.exists(src):
+                    os.replace(src, src + ".bak")
+                with open(src, "wb") as f:
+                    f.write(data)
+            except Exception as e:
+                raise RuntimeError("Lỗi tải %s: %s" % (fname, e))
+        return True
+
+    def on_update(self):
+        self.btn_update.config(state="disabled")
+
+        def work():
+            try:
+                import urllib.request, re as _re
+                ver_url = "https://raw.githubusercontent.com/%s/main/VERSION.txt" % UPDATE_REPO
+                req = urllib.request.Request(ver_url, headers={"User-Agent": "Mozilla/5.0"})
+                remote = urllib.request.urlopen(req, timeout=30).read().decode("utf-8").strip()
+                self.q.put(("log", "Kiểm tra cập nhật... (bản hiện tại v%s, trên git v%s)" % (VERSION, remote)))
+                if remote == VERSION:
+                    self.q.put(("update_done", "Bạn đang dùng bản mới nhất (v%s)." % VERSION))
+                    return
+                self.q.put(("log", "Có bản mới v%s. Đang tải về..." % remote))
+                self._update_files()
+                self.q.put(("update_restart", remote))
+            except Exception as e:
+                self.q.put(("update_err", str(e)))
+        threading.Thread(target=work, daemon=True).start()
 
     def on_get_captcha(self):
         self.btn_cap.config(state="disabled")
@@ -600,7 +669,7 @@ class App:
             return
         self._dl_folder = folder
         self._mst_ban = mst_ban or None
-        self._only_xml = self.v_only_xml.get()
+        self._mode = self.v_mode.get()   # zip | xml | pdf
         self.btn_start.config(state="disabled")
         self.tree.delete(*self.tree.get_children())
         self._counters = {"ok": 0, "fail": 0, "need": 0}
@@ -651,7 +720,7 @@ class App:
                     if total and len(datas) < total:
                         self.log("  ⚠️ Chỉ lấy được %d/%d hóa đơn (server lỗi tạm thời). Vui lòng bấm 'Thử lại' hoặc kiểm tra lại." % (len(datas), total), "err")
                     for inv in datas:
-                        tasks.append((m, label, inv, exp, self._only_xml))
+                        tasks.append((m, label, inv, exp, self._mode))
                 except Exception as e:
                     self.log("  ❌ Lỗi tra cứu %s: %s" % (label, e), "err")
 
@@ -663,19 +732,21 @@ class App:
         self._task_rows = {}
         self._task_inv = {}
         self._retrying = set()
-        for idx, (m, label, inv, exp, only_xml) in enumerate(tasks):
-            iid = self._add_task_row(m, label, inv, only_xml)
+        for idx, (m, label, inv, exp, mode) in enumerate(tasks):
+            iid = self._add_task_row(m, label, inv, mode)
             self._task_rows[idx] = iid
-            self._task_inv[idx] = (m, label, inv, exp, only_xml)
+            self._task_inv[idx] = (m, label, inv, exp, mode)
             self._iid_to_idx[iid] = idx
         # Tải theo lô: gửi nhiều export đỒNG THỜI, không chờ từng file xong tuần tự.
         self._executor.submit(self._run_download_batches, tasks)
         return total_need, total_need, 0
 
-    def _add_task_row(self, m, label, inv, only_xml):
+    def _ext(self, mode):
+        return {"zip": ".zip", "xml": ".xml", "pdf": ".pdf"}.get(mode, ".zip")
+
+    def _add_task_row(self, m, label, inv, mode):
         kh = inv.get("khhdon") or "x"; sh = inv.get("shdon") or "x"
-        ext = ".xml" if only_xml else ".zip"
-        name = "%s_%s_%s%s" % (m.strftime("%Y%m"), kh, sh, ext)
+        name = "%s_%s_%s%s" % (m.strftime("%Y%m"), kh, sh, self._ext(mode))
         iid = self.tree.insert("", "end", values=(name, "đang xử lý..."), tags=("pending",))
         self._row_basename[iid] = name
         return iid
@@ -686,7 +757,7 @@ class App:
         try:
             urls = []
             for idx in range(len(tasks)):
-                m, label, inv, exp, only_xml = self._task_inv[idx]
+                m, label, inv, exp, mode = self._task_inv[idx]
                 urls.append(EXPORT_URL.format(
                     exp=exp, nbmst=inv.get("nbmst") or "", khhdon=inv.get("khhdon") or "",
                     shdon=inv.get("shdon") or "", khmshdon=inv.get("khmshdon") or 1))
@@ -726,17 +797,26 @@ class App:
             self.q.put(("fatal", "Lỗi tải hàng loạt: %s" % e))
 
     def _write_result(self, idx, data):
-        m, label, inv, exp, only_xml = self._task_inv[idx]
+        m, label, inv, exp, mode = self._task_inv[idx]
         kh = inv.get("khhdon") or "x"; sh = inv.get("shdon") or "x"
-        outn = "%s_%s_%s.%s" % (m.strftime("%Y%m"), kh, sh, "xml" if only_xml else "zip")
+        outn = "%s_%s_%s%s" % (m.strftime("%Y%m"), kh, sh, self._ext(mode))
         if data[:2] != b"PK":
             raise RuntimeError("Không phải file ZIP")
         dest = os.path.join(self._dl_folder, outn)
+        if self._base_was_xml(mode):
+            # render invoice.html ra PDF (in hóa đơn) qua engine PDF
+            html, assets = self._extract_invoice_html(data)
+            self.gw.call("render_pdf", html, dest)
+            if assets:
+                try: shutil.rmtree(assets, ignore_errors=True)
+                except Exception: pass
+            self.q.put(("fstatus", idx, "ok", outn, os.path.basename(dest)))
+            return
         n = 1
         while os.path.exists(dest):
             stem, ext = os.path.splitext(outn)
             dest = os.path.join(self._dl_folder, "%s_%d%s" % (stem, n, ext)); n += 1
-        if only_xml:
+        if mode == "xml":
             with zipfile.ZipFile(io.BytesIO(data)) as z:
                 xml_name = next((x for x in z.namelist() if os.path.basename(x).lower() == "invoice.xml"), None)
                 if xml_name is None:
@@ -749,17 +829,41 @@ class App:
                 f.write(data)
         self.q.put(("fstatus", idx, "ok", outn, os.path.basename(dest)))
 
+    def _base_was_xml(self, mode):
+        return mode == "pdf"
+
+    def _extract_invoice_html(self, data):
+        """Giải nén invoice.html + các ảnh/assets cùng thư mục; trả (html_path, tmp_dir)."""
+        import shutil
+        tmp = tempfile.mkdtemp(prefix="hddt_pdf_")
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            for nm in z.namelist():
+                # an toàn: bỏ mọi đường dẫn tuyệt đối/dot-dot
+                safe = os.path.basename(nm)
+                if not safe:
+                    continue
+                with open(os.path.join(tmp, safe), "wb") as f:
+                    f.write(z.read(nm))
+        html = os.path.join(tmp, "invoice.html")
+        if not os.path.exists(html):
+            # thử nhặt 1 file .html bất kỳ dưới gốc
+            cands = [f for f in os.listdir(tmp) if f.lower().endswith(".html")]
+            if not cands:
+                raise RuntimeError("ZIP không chứa invoice.html")
+            html = os.path.join(tmp, cands[0])
+        return html, tmp
+
     def _q_fail(self, idx, msg):
-        m, label, inv, exp, only_xml = self._task_inv[idx]
+        m, label, inv, exp, mode = self._task_inv[idx]
         kh = inv.get("khhdon") or "x"; sh = inv.get("shdon") or "x"
-        outn = "%s_%s_%s.%s" % (m.strftime("%Y%m"), kh, sh, "xml" if only_xml else "zip")
+        outn = "%s_%s_%s%s" % (m.strftime("%Y%m"), kh, sh, self._ext(mode))
         info = "%s | MST %s | KH %s | Số %s | %s" % (
             label, inv.get("nbmst") or "", kh, sh, inv.get("nbten") or "")
         self.q.put(("fstatus", idx, "fail", outn, info + "  ← " + str(msg)))
 
     def _dl_worker(self, idx):
         """Tải lại 1 hóa đơn (dùng cho nút 'Thử lại')."""
-        m, label, inv, exp, only_xml = self._task_inv[idx]
+        m, label, inv, exp, mode = self._task_inv[idx]
         kh = inv.get("khhdon") or "x"; sh = inv.get("shdon") or "x"
         try:
             data = self.gw.call("export_xml", inv, exp)
@@ -874,6 +978,15 @@ class App:
                     self._logged_in = True
                 elif msg[0] == "login_err":
                     self._log_inline("❌ " + msg[1], "err")
+                elif msg[0] == "update_done":
+                    self._log_inline("✅ " + msg[1], "ok")
+                    self.btn_update.config(state="normal")
+                elif msg[0] == "update_err":
+                    self._log_inline("❌ Cập nhật lỗi: " + msg[1], "err")
+                    self.btn_update.config(state="normal")
+                elif msg[0] == "update_restart":
+                    self._log_inline("📦 Đã cập nhật lên v%s. Đang khởi động lại app..." % msg[1], "ok")
+                    self.root.after(600, self._restart_app)
                 elif msg[0] == "fstatus":
                     item, kind, name, subj = msg[1], msg[2], msg[3], msg[4]
                     iid = self._task_rows.get(item)
@@ -895,6 +1008,23 @@ class App:
             pass
         self.btn_cap.config(state="normal")
         self.root.after(60, self._poll)
+
+    def _restart_app(self):
+        try:
+            self.gw.call("stop")
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        try:
+            bat = os.path.join(APP_DIR, "hddt.bat")
+            if os.path.exists(bat):
+                import subprocess
+                subprocess.Popen(["cmd", "/c", bat], cwd=APP_DIR, shell=True)
+        except Exception:
+            pass
 
     def _check_finish(self):
         if self._summary_sent:
