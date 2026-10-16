@@ -1269,7 +1269,7 @@ body{font-family:'Times New Roman',Tahoma,Arial,sans-serif;font-size:12.5px;marg
             while True:
                 msg = self.q.get_nowait()
                 if msg[0] == "log":
-                    self._log_inline(msg[1], msg[2])
+                    self._log_inline(msg[1], msg[2] if len(msg) > 2 else None)
                 elif msg[0] == "cap_ok":
                     key, png = msg[1], msg[2]
                     self._pending_captcha_key = key
