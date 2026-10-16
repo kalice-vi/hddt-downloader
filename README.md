@@ -54,6 +54,12 @@ Hai cách, chọn 1:
 - Server đôi khi trả mã 504 (nghẽn): export tự thử lại tối đa 3 lần; file nào vẫn lỗi
   sẽ hiện đỏ và liệt kê để tải tay.
 
+## Tính năng mới (v1.2.0 — clone từ repo dieutx/TaiHoaDonDienTu)
+- **Tự giải CAPTCHA**: bấm "Lấy mã captcha" là app tự đọc mã (đọc path SVG) và điền sẵn — chỉ cần bấm Đăng nhập. (module `hddt_captcha.py`)
+- **Lọc trạng thái HĐ (tthai) + kết quả kiểm tra (ttxly)**: chọn trong form để tra cứu đúng nhóm. (module `hddt_filter.py`)
+- **Hóa đơn liên quan / chuỗi thay thế–điều chỉnh**: tích chọn để tải kèm, lưu file `*_lienquan.json`. (module `hddt_related.py`)
+- **Tải bổ sung (chống trùng)**: tích chọn để bỏ qua hóa đơn đã tải (lưu trạng thái `hddt_state.json`). (module `hddt_resume.py`)
+
 ## Xử lý sự cố
 - Nếu app báo thiếu thư viện/chromium, **xóa thư mục `.venv`** rồi mở lại `hddt.bat` để cài lại từ đầu.
 
