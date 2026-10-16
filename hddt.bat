@@ -7,7 +7,7 @@ set "VENV=%~dp0.venv\Scripts\python.exe"
 
 rem ---------- venv hop le thi mo app ----------
 if not exist "%VENV%" goto :install
-"%VENV%" -c "import playwright, playwright.sync_api" >nul 2>&1
+"%VENV%" -c "import playwright, segno; import playwright.sync_api" >nul 2>&1
 if errorlevel 1 goto :install
 "%VENV%" -m playwright --version >nul 2>&1
 if errorlevel 1 goto :install
@@ -77,7 +77,7 @@ rem ---------- cai thu vien ----------
 call "%~dp0.venv\Scripts\activate.bat"
 set "UV_DEFAULT_INDEX=https://pypi.org/simple"
 python -m pip install --upgrade pip >nul 2>&1
-pip install playwright pillow
+pip install playwright pillow segno
 if errorlevel 1 goto :err
 python -m playwright install chromium
 if errorlevel 1 goto :err

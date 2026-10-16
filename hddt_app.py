@@ -873,6 +873,17 @@ class App:
 
     # ---------------- in PDF từ detail JSON (in từ web) ----------------
     @staticmethod
+    def _qr_svg(data, w=78):
+        """Sinh QR thật (segno) từ mã xác thực hóa đơn — giống QR web vẽ. Trả svg."""
+        try:
+            import segno
+            qr = segno.make(data, error="m", boost_error=False)
+            return qr.svg_inline(scale=4, dark="#000", light="#ffffff",
+                                 border=0).replace(">", ">")
+        except Exception:
+            return '<svg viewBox="0 0 41 41" style="width:%dpx;height:%dpx" preserveAspectRatio="xMidYMid meet"></svg>' % (w, w)
+
+    @staticmethod
     def _num(v):
         try:
             return format(float(v or 0), ",.0f").replace(",", ".")
@@ -943,6 +954,7 @@ class App:
                             ) if False else num(d.get("tgtttbso") or d.get("tcmthanh") or d.get("tgtcthue")),
             "tgtttbchu": esc(d.get("tgtttbchu") or d.get("tcmthanhchu") or ""),
             "khd": esc(d.get("nbten") or "") + " — " + esc(d.get("nguoiky") or "") if d.get("nbten") else "",
+            "qr": App._qr_svg(d.get("mhdon") or d.get("mccqt") or "", w=78),
         }
         return string.Template("""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
@@ -982,7 +994,7 @@ body{font-family:'Times New Roman',Tahoma,Arial,sans-serif;font-size:12.5px;marg
 </style></head>
 <body><div class="print-page"><div class="main-page">
 <div class="heading-content"><div class="top-content">
-  <svg viewBox="0 0 41 41" style="width:78px;height:78px"></svg>
+  $qr
   <div class="code-content"><div class="code-ms">
     <b>$khmshdon</b><b>$khhdon</b><b>$shdon</b>
   </div></div>
