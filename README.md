@@ -54,6 +54,14 @@ Hai cách, chọn 1:
 - Server đôi khi trả mã 504 (nghẽn): export tự thử lại tối đa 3 lần; file nào vẫn lỗi
   sẽ hiện đỏ và liệt kê để tải tay.
 
+## Đã test LIVE end-to-end (đăng nhập thật, captcha tự giải)
+- Đăng nhập MST 3700333264: OK (captcha tự giải đúng — vd `W26QGH`, `TQG63R`, `ENYSRD`).
+- Tra cứu 10 tháng 2026: total lần lượt 24/20/14/39/32/32/30/34/37/11.
+- Tháng 04/2026: lấy đủ **39/39 hóa đơn**; tải **3/3 ZIP** (~320KB, header `PK`) + **3/3 PDF** (~284KB, header `%PDF`).
+- ZIP chứa đúng 5 mục: `details.js`, `viewinvoice-bg.jpg`, `sign-check.jpg`, `invoice.xml`, `invoice.html` (khớp ảnh nhúng trong app).
+- Lọc trạng thái (tthai): 39 tổng → **35** HĐ mới (4 HĐ bị thay thế/điều chỉnh).
+- Hóa đơn liên quan: chuỗi thật HĐ 90 (tthai=2) ⇄ HĐ 73 (tthai=4, `shdgoc=73`).
+
 ## Tính năng mới (v1.3.0 — gộp cơ chế tải song song của dieutx)
 - **Van tiết lưu tự thích ứng** (`hddt_throttle.py`, port `clsGdtXmlThrottle`): 6 kết nối / 300ms, throughput bị chặn bởi khoảng cách giữa 2 lần khởi động request.
 - **Governor 429**: gặp chặn → cooldown (theo `Retry-After`), bớt 1 kết nối (tối đa 1 lần/30s), interval ×1.5 (trần 5s); mỗi 10s **tự hồi** tốc độ khi GDT thôi chặn.

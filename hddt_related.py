@@ -8,6 +8,7 @@ Endpoints (đã xác nhận từ source VBA):
 source ∈ {'query' (HĐĐT), 'sco-query' (máy tính tiền)}.
 Action header phải đặt đúng (URL-encoded) như web.
 """
+import time
 import urllib.parse
 
 BASE = "https://hoadondientu.gdt.gov.vn"
@@ -56,6 +57,31 @@ def parse_related_list(json_obj):
     return []
 
 
+def related_from_invoice(inv):
+    """Lấy danh sách hóa đơn liên quan có cấu trúc từ chính object HĐ
+    (field 'hdonLquans' — nguồn modGhiExcel dùng). Trả list (rỗng nếu không có)."""
+    if not isinstance(inv, dict):
+        return []
+    arr = inv.get("hdonLquans")
+    if isinstance(arr, list):
+        return [x for x in arr if isinstance(x, dict)]
+    return []
+
+
+def relative_kind(inv):
+    """Phân loại 1 object HĐ theo 'tthai' (cần gọi 'related' hay 'relative'):
+    tthai=6 (đã hủy) -> 'related'; tthai 2..5 -> 'relative'; còn lại -> None."""
+    try:
+        st = int(inv.get("tthai") or 0)
+    except Exception:
+        return None
+    if st == 6:
+        return "related"
+    if 2 <= st <= 5:
+        return "relative"
+    return None
+
+
 def _make_headers(client, action_encoded):
     """Header giống client._headers nhưng KHÔNG quote lại action (đã encode sẵn)."""
     import uuid
@@ -71,8 +97,9 @@ def _make_headers(client, action_encoded):
 
 def fetch_related(client, source, inv, invoice_type, timeout_ms=45000):
     """Dùng client (HDDTClient: .page, .token) để lấy relative + related cho 1 HĐ.
-    Trả {'relative': list, 'info': dict|None, 'error': str|None}. Không raise."""
-    out = {"relative": [], "info": None, "error": None}
+    Trả {'relative': list, 'info': dict|None, 'from_invoice': list, 'error': str|None}.
+    Không raise."""
+    out = {"relative": [], "info": None, "from_invoice": related_from_invoice(inv), "error": None}
     page = getattr(client, "page", None)
     if page is None:
         out["error"] = "Trình duyệt chưa sẵn sàng"
@@ -86,6 +113,10 @@ def fetch_related(client, source, inv, invoice_type, timeout_ms=45000):
             url = build_related_url(source, endpoint, inv)
             hdr = _make_headers(client, build_related_action(endpoint, source, invoice_type))
             r = page.evaluate(js, {"u": url, "h": hdr, "t": timeout_ms})
+            if (not r or r.get("status") != 200) and endpoint == "relative":
+                # 1 lần thử lại (endpoint relative đôi khi chậm/timeout ~45s)
+                time.sleep(1.0)
+                r = page.evaluate(js, {"u": url, "h": hdr, "t": timeout_ms + 45000})
             if not r or r.get("status") != 200:
                 out["error"] = (out["error"] or "") + \
                     "[%s %s] " % (endpoint, (r or {}).get("status"))
@@ -126,5 +157,17 @@ if __name__ == "__main__":
     pl3 = parse_related_list(None)
     print("parse None:", pl3, "->", "PASS" if pl3 == [] else "FAIL")
     ok = ok and pl3 == []
+
+    rfi = related_from_invoice({"hdonLquans": [{"a": 1}, "x", {"b": 2}]})
+    print("related_from_invoice:", rfi, "->", "PASS" if rfi == [{"a": 1}, {"b": 2}] else "FAIL")
+    ok = ok and rfi == [{"a": 1}, {"b": 2}]
+    ok = ok and related_from_invoice({"hdonLquans": None}) == [] and related_from_invoice(None) == []
+
+    rk = relative_kind({"tthai": 6})
+    rk2 = relative_kind({"tthai": 2})
+    rk3 = relative_kind({"tthai": 1})
+    print("relative_kind 6/2/1:", rk, rk2, rk3, "->",
+          "PASS" if (rk == "related" and rk2 == "relative" and rk3 is None) else "FAIL")
+    ok = ok and rk == "related" and rk2 == "relative" and rk3 is None
 
     print("KET QUA:", "TAT CA PASS" if ok else "CO FAIL")
