@@ -54,7 +54,13 @@ Hai cách, chọn 1:
 - Server đôi khi trả mã 504 (nghẽn): export tự thử lại tối đa 3 lần; file nào vẫn lỗi
   sẽ hiện đỏ và liệt kê để tải tay.
 
-## Tính năng mới (v1.2.0 — clone từ repo dieutx/TaiHoaDonDienTu)
+## Tính năng mới (v1.3.0 — gộp cơ chế tải song song của dieutx)
+- **Van tiết lưu tự thích ứng** (`hddt_throttle.py`, port `clsGdtXmlThrottle`): 6 kết nối / 300ms, throughput bị chặn bởi khoảng cách giữa 2 lần khởi động request.
+- **Governor 429**: gặp chặn → cooldown (theo `Retry-After`), bớt 1 kết nối (tối đa 1 lần/30s), interval ×1.5 (trần 5s); mỗi 10s **tự hồi** tốc độ khi GDT thôi chặn.
+- **Phát hiện "Không có XML"** (200 nhưng không phải ZIP) thay vì báo lỗi chung.
+- **Buffer JSON** cho pha in/chi tiết (4 kết nối).
+
+## Tính năng (v1.2.0 — clone từ repo dieutx/TaiHoaDonDienTu)
 - **Tự giải CAPTCHA**: bấm "Lấy mã captcha" là app tự đọc mã (đọc path SVG) và điền sẵn — chỉ cần bấm Đăng nhập. (module `hddt_captcha.py`)
 - **Lọc trạng thái HĐ (tthai) + kết quả kiểm tra (ttxly)**: chọn trong form để tra cứu đúng nhóm. (module `hddt_filter.py`)
 - **Hóa đơn liên quan / chuỗi thay thế–điều chỉnh**: tích chọn để tải kèm, lưu file `*_lienquan.json`. (module `hddt_related.py`)
