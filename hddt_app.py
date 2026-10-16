@@ -15,7 +15,7 @@ HDDT Downloader — mini app tải hóa đơn điện tử hoadondientu.gdt.gov.
   vì Akamai WAF chặn HTTP trực tiếp của requests/urllib.
 - Chạy:  run.bat  (cài lần đầu: setup.bat)
 """
-import os, sys, json, time, base64, threading, queue, tempfile, datetime, re, uuid, urllib.parse, concurrent.futures, zipfile, io
+import os, sys, json, time, base64, threading, queue, tempfile, datetime, string, re, uuid, urllib.parse, concurrent.futures, zipfile, io
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -399,18 +399,84 @@ class HDDTClient:
             return [(0, None, "Hết thời gian chờ server") for _ in urls]
         return [(x.get("status", 0), x.get("b64"), x.get("err")) for x in r]
 
-    def render_pdf(self, html_path, pdf_path, timeout_ms=45000):
-        """In 1 file HTML (hóa đơn) thành PDF. Dùng Chromium headless riêng vì
-        page.pdf() chỉ chạy ở headless. Trả về pdf_path nếu thành công."""
-        import urllib.parse as _up
-        url = "file:///" + _up.quote(html_path.replace("\\", "/"))
+    def detail_batch(self, invs, prefix="query", action="Xem chi tiết", dmin=0.2, dmax=0.3, timeout_ms=45000):
+        """Gọi /api/{prefix}/invoices/detail cho nhiều hóa đơn ĐỒNG THỜI (in từ web).
+        Trả list [(status, detail_json_or_None, err_or_None)] theo thứ tự."""
+        urls = []
+        for inv in invs:
+            urls.append("%s/api/%s/invoices/detail?nbmst=%s&khhdon=%s&shdon=%s&khmshdon=%s" % (
+                BASE, prefix,
+                urllib.parse.quote(str(inv.get("nbmst") or "")),
+                urllib.parse.quote(str(inv.get("khhdon") or "")),
+                str(inv.get("shdon") or ""),
+                inv.get("khmshdon") or 1))
+        js = (
+            "(a)=>new Promise(res=>{"
+            "let jobs=[],i=0;"
+            "let fet=(u)=>fetch(u,{credentials:'include',headers:a.h,"
+            "signal:AbortSignal.timeout(a.t)}).then(async r=>{"
+            "const t=await r.text();"
+            "let j=null;try{j=JSON.parse(t);}catch(e){}"
+            "return {status:r.status,json:j,err:null};"
+            "}).catch(e=>({status:0,json:null,err:String(e)}));"
+            "let rand=()=>a.dmin+Math.random()*(a.dmax-a.dmin);"
+            "async function kick(){"
+            "for(;i<a.urls.length;i++){"
+            "jobs.push(fet(a.urls[i]));"
+            "if(i<a.urls.length-1)await new Promise(r2=>setTimeout(r2,rand()*1000));"
+            "}"
+            "Promise.all(jobs).then(res);"
+            "}"
+            "kick();})"
+        )
+        hdr = self._headers(action)
+        wait_ms = timeout_ms + len(urls) * int(dmax * 1000) + 20000
+        try:
+            old = self.page._default_timeout
+        except Exception:
+            old = None
+        try:
+            self.page.set_default_timeout(wait_ms)
+            r = self.page.evaluate(js, {"urls": urls, "h": hdr, "t": timeout_ms, "dmin": dmin, "dmax": dmax})
+        except Exception as e:
+            return [(0, None, "Lỗi trình duyệt: %s" % e) for _ in urls]
+        finally:
+            try:
+                self.page.set_default_timeout(old if old else 30000)
+            except Exception:
+                pass
+        if r is None:
+            return [(0, None, "Hết thời gian chờ server") for _ in invs]
+        return [(x.get("status", 0), x.get("json"), x.get("err")) for x in r]
+
+    def detail(self, inv, prefix="query", action="Xem chi tiết", timeout_ms=45000):
+        """Gọi /api/{prefix}/invoices/detail 1 hóa đơn, trả JSON (dùng khi lô lỗi)."""
+        url = "%s/api/%s/invoices/detail?nbmst=%s&khhdon=%s&shdon=%s&khmshdon=%s" % (
+            BASE, prefix,
+            urllib.parse.quote(str(inv.get("nbmst") or "")),
+            urllib.parse.quote(str(inv.get("khhdon") or "")),
+            str(inv.get("shdon") or ""), inv.get("khmshdon") or 1)
+        js = ("(a)=>fetch(a.u,{credentials:'include',headers:a.h,"
+              "signal:AbortSignal.timeout(a.t)}).then(async r=>{"
+              "const t=await r.text();let j=null;try{j=JSON.parse(t);}catch(e){}"
+              "return {status:r.status,json:j};}).catch(e=>({status:0,json:null}))")
+        try:
+            r = self.page.evaluate(js, {"u": url, "h": self._headers(action), "t": timeout_ms})
+            if r and r.get("status") == 200 and r.get("json"):
+                return r["json"]
+        except Exception as e:
+            raise RuntimeError("Lỗi trình duyệt: %s" % e)
+        return None
+
+    def render_pdf(self, html_str, pdf_path, timeout_ms=45000):
+        """In 1 HTML (dựng từ detail JSON, giống trang in web) thành PDF.
+        Dùng Chromium headless riêng vì page.pdf() chỉ chạy ở headless."""
         browser = None
         try:
             browser = self.pw.chromium.launch(headless=True)
             page = browser.new_page()
-            page.goto(url, wait_until="networkidle", timeout=timeout_ms)
-            # chờ render ảnh/font
-            page.wait_for_timeout(900)
+            page.set_content(html_str, wait_until="load", timeout=timeout_ms)
+            page.wait_for_timeout(900)   # chờ render ảnh/font
             page.pdf(path=pdf_path, format="A4", print_background=True)
             page.close()
             if not os.path.exists(pdf_path):
@@ -753,14 +819,23 @@ class App:
 
     def _run_download_batches(self, tasks):
         """Tải theo lô: gom URL export, gửi ĐỒNG THỜI qua export_batch, ghi file +
-        cập nhật trạng thái từng hóa đơn khi có kết quả. Không chờ tuần tự."""
+        cập nhật trạng thái từng hóa đơn khi có kết quả. Không chờ tuần tự.
+        Mode 'pdf': in từ web — gọi detail API, dựng HTML chuẩn, page.pdf()."""
         try:
             urls = []
+            pdf_invs = []   # (idx, inv, prefix) — chỉ dùng khi mode pdf
             for idx in range(len(tasks)):
                 m, label, inv, exp, mode = self._task_inv[idx]
+                if mode == "pdf":
+                    pdf_invs.append((idx, inv, exp))
+                    continue
                 urls.append(EXPORT_URL.format(
                     exp=exp, nbmst=inv.get("nbmst") or "", khhdon=inv.get("khhdon") or "",
                     shdon=inv.get("shdon") or "", khmshdon=inv.get("khmshdon") or 1))
+            # chế độ PDF: gọi detail API rồi in từng file
+            if pdf_invs:
+                self._run_pdf_batch(pdf_invs)
+                return
             # gửi mỗi lô BATCH_CONC cùng lúc
             for start in range(0, len(urls), BATCH_CONC):
                 chunk_idx = list(range(start, min(start + BATCH_CONC, len(urls))))
@@ -795,6 +870,220 @@ class App:
                 time.sleep(0.4)
         except Exception as e:
             self.q.put(("fatal", "Lỗi tải hàng loạt: %s" % e))
+
+    # ---------------- in PDF từ detail JSON (in từ web) ----------------
+    @staticmethod
+    def _num(v):
+        try:
+            return format(float(v or 0), ",.0f").replace(",", ".")
+        except Exception:
+            return str(v or "")
+
+    @staticmethod
+    def detail_to_html(d):
+        """Dựng HTML hóa đơn khớp CẤU TRÚC WEB .print-page (bắt được từ tab in thật):
+        top-content(QR + code-ms Mẫu số/Ký hiệu/Số), main-title, day(Ngày/tháng/năm) +
+        MCCQT, content-info (data-item di-label/di-value: người bán + số tài khoản+ngân
+        hàng, người mua), bảng res-tb (STT/tên/ĐVT/SL/đơn giá/CK/thuế/thành tiền),
+        cộng tiền/thuế/tổng + bằng chữ, ft-sign NGƯỜI MUA/NGƯỜI BÁN + sign-box.
+        Nguồn: JSON /api/.../invoices/detail (đúng endpoint nút "In hóa đơn" dùng)."""
+        import html as _h
+        def esc(x):
+            s = "" if x is None else str(x)
+            s = _h.escape(s).replace("`", "'")
+            return s.replace('"', "&quot;")
+        def num(v):
+            try:
+                return format(float(v or 0), ",.0f").replace(",", ".")
+            except Exception:
+                return "" if v is None else str(v)
+        tdlap = (d.get("tdlap") or "")
+        ngay = tdlap[8:10] if len(tdlap) >= 10 else (d.get("ngay") or "")
+        thang = tdlap[5:7] if len(tdlap) >= 10 else (d.get("thang") or "")
+        nam = tdlap[0:4] if len(tdlap) >= 10 else (d.get("nam") or "")
+        rows = ""
+        for it in (d.get("hdhhdvu") or []):
+            rows += (
+                "<tr><td class='tc'>%s</td><td>%s</td><td class='tc'>%s</td>"
+                "<td class='tc'>%s</td><td class='tc'>%s</td><td class='tc'>%s</td>"
+                "<td class='tc'>%s</td><td class='tc'>%s</td></tr>" % (
+                    esc(it.get("stt") or ""), esc(it.get("ten") or ""), esc(it.get("dvtinh") or ""),
+                    num(it.get("sluong")), num(it.get("dgia")), num(it.get("ckthau")),
+                    esc(it.get("tsuat") or ""), num(it.get("thtien"))))
+        if not rows:
+            rows = '<tr><td class="tc" colspan="8">Không có dữ liệu</td></tr>'
+        sk = " ".join(filter(None, [esc(d.get("nbstkhoan") or ""), esc(d.get("nbtnhang") or "")]))
+        sub = {
+            "khmshdon": "Mẫu số: %s" % esc(d.get("khmshdon") or d.get("mauhdon") or ""),
+            "khhdon": "Ký hiệu: %s" % esc(d.get("khhdon") or ""),
+            "shdon": "Số: %s" % esc(d.get("shdon") or ""),
+            "title": esc(d.get("tlhdon") or d.get("thdon") or d.get("loaihdon") or "HÓA ĐƠN GIÁ TRỊ GIA TĂNG"),
+            "ngay": esc(ngay), "thang": esc(thang), "nam": esc(nam),
+            "mccqt": esc(d.get("mhdon") or d.get("mccqt") or ""),
+            "nbten": ("<div class='data-item'><div class='di-label'><span>Tên người bán:</span></div>"
+                      "<div class='di-value'><div>%s</div></div></div>") % esc(d.get("nbten") or ""),
+            "nbms": ("<div class='data-item'><div class='di-label'><span>Mã số thuế:</span></div>"
+                     "<div class='di-value'><div>%s</div></div></div>") % esc(d.get("nbmst") or ""),
+            "nbdc": ("<div class='data-item'><div class='di-label'><span>Địa chỉ:</span></div>"
+                     "<div class='di-value'><div>%s</div></div></div>") % esc(d.get("nbdchi") or ""),
+            "nbsdt": ("<div class='data-item'><div class='di-label'><span>Điện thoại:</span></div>"
+                      "<div class='di-value'><div>%s</div></div></div>") % esc(d.get("nbsdthoai") or ""),
+            "nbsk": ("<div class='data-item'><div class='di-label'><span>Số tài khoản:</span></div>"
+                     "<div class='di-value'><div>%s</div></div></div>") % esc(sk),
+            "nmten": ("<div class='data-item'><div class='di-label'><span>Tên người mua:</span></div>"
+                      "<div class='di-value'><div>%s</div></div></div>") % esc(d.get("nmten") or ""),
+            "nmmst": ("<div class='data-item'><div class='di-label'><span>Mã số thuế:</span></div>"
+                      "<div class='di-value'><div>%s</div></div></div>") % esc(d.get("nmmst") or ""),
+            "nmdc": ("<div class='data-item'><div class='di-label'><span>Địa chỉ:</span></div>"
+                     "<div class='di-value'><div>%s</div></div></div>") % esc(d.get("nmdchi") or ""),
+            "rows": rows,
+            "tgtcthue": num(d.get("tgtcthue") or d.get("tgtctthue")),
+            "tgttthue": num(d.get("tgttthue") or d.get("tgtthue")),
+            "tgtttbso": num(d.get("tgtttbso") or d.get("tgtgtt"),
+                            ) if False else num(d.get("tgtttbso") or d.get("tcmthanh") or d.get("tgtcthue")),
+            "tgtttbchu": esc(d.get("tgtttbchu") or d.get("tcmthanhchu") or ""),
+            "khd": esc(d.get("nbten") or "") + " — " + esc(d.get("nguoiky") or "") if d.get("nbten") else "",
+        }
+        return string.Template("""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+body{font-family:'Times New Roman',Tahoma,Arial,sans-serif;font-size:12.5px;margin:0;color:#000;-webkit-print-color-adjust:exact}
+@page{margin:12mm 10mm}
+.print-page,.main-page{width:100%}
+.top-content{display:flex;align-items:flex-start;justify-content:space-between;border-bottom:1px solid #000;padding-bottom:6px}
+.code-ms{display:flex;flex-direction:column;font-weight:bold;text-align:right;font-size:12px;gap:2px}
+.title-heading{text-align:center;margin:12px 0}
+.main-title{font-size:20px;font-weight:bold;margin:0 0 6px}
+.day{margin:1px 0;font-size:12.5px}
+.list-fill-out{list-style:none;margin:0;padding:0;width:100%}
+.data-item{display:flex;margin:1px 0}
+.di-label{width:30%;min-width:120px;padding-right:6px}
+.di-label span{font-weight:normal}
+.di-value{flex:1}
+.di-value b{font-weight:bold}
+.vip-divide{border-top:1px solid #000;margin:10px 0}
+.res-tb{border-collapse:collapse;width:100%;margin-top:8px}
+.res-tb th,.res-tb td{border:1px solid #000;padding:3px 5px;font-size:11.5px;vertical-align:middle}
+.res-tb th{text-align:center;font-weight:bold}
+.tc{text-align:center!important;white-space:nowrap}
+.total{margin-top:8px;width:100%}
+.total table.res-tb{margin-top:0}
+.total .res-tb td{border:0;text-align:right;padding:2px 6px;font-size:12.5px}
+.contrib{width:360px;margin-left:auto}
+.bangchu{font-style:italic;text-align:justify;margin:12px 0 4px}
+.ft-sign{display:flex;justify-content:space-between;margin-top:18px;gap:40px}
+.ft-sign h3{margin:0;font-weight:bold;font-size:13px;text-align:center;flex:1}
+.ft-sign h3 p{margin:2px 0}
+.ft-sign i{font-size:11px;font-style:italic;font-weight:normal}
+.sign-box{font-size:10.5px;margin-top:12px;color:#060}
+.sign-box span{display:block}
+.ft-end{margin-top:16px;text-align:center;font-style:italic;font-size:11px}
+.gtgt{font-size:9.5px;color:#333;margin-top:12px;line-height:1.6}
+.gtgt p{margin:2px 0}
+</style></head>
+<body><div class="print-page"><div class="main-page">
+<div class="heading-content"><div class="top-content">
+  <svg viewBox="0 0 41 41" style="width:78px;height:78px"></svg>
+  <div class="code-content"><div class="code-ms">
+    <b>$khmshdon</b><b>$khhdon</b><b>$shdon</b>
+  </div></div>
+</div></div>
+<div class="title-heading"><h2 class="main-title">$title</h2>
+  <div class="day"><span>Ngày $ngay&nbsp;&nbsp;tháng $thang&nbsp;&nbsp;năm $nam</span></div>
+  <div class="day"><span>MCCQT: $mccqt</span></div>
+</div>
+<div class="vip-divide"></div>
+<div class="content-info"><ul class="list-fill-out">
+  $nbten
+  $nbms
+  $nbdc
+  $nbsdt
+  $nbsk
+</ul></div>
+<div class="vip-divide"></div>
+<div class="content-info"><ul class="list-fill-out">
+  $nmten
+  $nmmst
+  $nmdc
+</ul></div>
+<div class="vip-divide"></div>
+<table class="res-tb"><thead><tr>
+  <th style="width:32px">STT</th><th>Tên hàng hóa, dịch vụ</th><th style="width:50px">ĐVT</th>
+  <th style="width:60px">Số lượng</th><th style="width:70px">Đơn giá</th><th style="width:56px">CK</th>
+  <th style="width:48px">Thuế</th><th style="width:84px">Thành tiền</th>
+</tr></thead><tbody>$rows</tbody></table>
+<div class="total">
+  <table class="res-tb contrib"><tbody>
+    <tr><td>Cộng tiền hàng hóa, dịch vụ</td><td>$tgtcthue</td></tr>
+    <tr><td>Thuế suất GTGT</td><td>$tgttthue</td></tr>
+    <tr><td><b>Tổng cộng tiền thanh toán</b></td><td><b>$tgtttbso</b></td></tr>
+  </tbody></table>
+</div>
+<div class="bangchu"><span>Tổng tiền thanh toán (bằng chữ): $tgtttbchu</span></div>
+<div class="vip-divide"></div>
+<div class="ft-sign">
+  <h3><p>NGƯỜI MUA HÀNG</p><p><i>(Ký, ghi rõ họ tên)</i></p><div style="height:56px"></div></h3>
+  <h3><p>NGƯỜI BÁN HÀNG</p><p><i>(Ký, đóng dấu, ghi rõ họ tên)</i></p>
+    <div style="height:48px"></div><div class="sign-box"><span>Signature Valid</span><span>$khd</span></div>
+  </h3>
+</div>
+<div class="vip-divide"></div>
+<div class="ft-end"><p>(Cần kiểm tra, đối chiếu khi lập, nhận hóa đơn)</p></div>
+<div class="gtgt"><h3 class="main-title" style="font-size:13px;text-align:center">Thông tin quan trọng cho người nộp thuế</h3>
+<p>- Bản công khai đúng như người đã đăng ký được định danh theo TT số 72/2014/TT-BTC ngày 30/05/2014; Thông tư số 92/2019/TT-BTC ngày 31/12/2019 sửa đổi, bổ sung Thông tư số 72/2014/TT-BTC của Bộ Tài chính về hóa đơn chứng từ.</p>
+<p>- Bản công khai thực hiện trong vòng 60 ngày kể từ ngày mua hàng (kể từ ngày phát hành hóa đơn).</p>
+</div>
+</div></div>
+</body></html>""").safe_substitute(sub)
+
+    def _run_pdf_batch(self, pdf_invs):
+        """Chế độ in PDF: gọi detail API cho từng lô, dựng HTML, page.pdf() — 
+        in được cả hóa đơn ngân hàng (không cần zip export)."""
+        try:
+            for start in range(0, len(pdf_invs), BATCH_CONC):
+                chunk = pdf_invs[start:start + BATCH_CONC]
+                invs = [inv for _, inv, _ in chunk]
+                prefix = chunk[0][2] if chunk else "query"
+                res = self.gw.call("detail_batch", invs, prefix)
+                for off, (status, j, err) in enumerate(res):
+                    idx, inv, _ = chunk[off]
+                    if status == 200 and j:
+                        try:
+                            html_str = self.detail_to_html(j)
+                            kh = inv.get("khhdon") or "x"; sh = inv.get("shdon") or "x"
+                            outn = "%s_%s_%s.pdf" % (self._task_inv[idx][0].strftime("%Y%m"), kh, sh)
+                            dest = os.path.join(self._dl_folder, outn)
+                            n = 1
+                            while os.path.exists(dest):
+                                stem, _ext = os.path.splitext(outn)
+                                dest = os.path.join(self._dl_folder, "%s_%d%s" % (stem, n, _ext)); n += 1
+                            self.gw.call("render_pdf", html_str, dest)
+                            self.q.put(("fstatus", idx, "ok", outn, os.path.basename(dest)))
+                        except Exception as e:
+                            self._q_fail(idx, str(e))
+                    elif status in (429, 500, 502, 503, 504, 0):
+                        time.sleep(1.2)
+                        try:
+                            j2 = self.gw.call("detail", inv, prefix)
+                            if j2:
+                                html_str = self.detail_to_html(j2)
+                                kh = inv.get("khhdon") or "x"; sh = inv.get("shdon") or "x"
+                                outn = "%s_%s_%s.pdf" % (self._task_inv[idx][0].strftime("%Y%m"), kh, sh)
+                                dest = os.path.join(self._dl_folder, outn)
+                                n = 1
+                                while os.path.exists(dest):
+                                    stem, _ext = os.path.splitext(outn)
+                                    dest = os.path.join(self._dl_folder, "%s_%d%s" % (stem, n, _ext)); n += 1
+                                self.gw.call("render_pdf", html_str, dest)
+                                self.q.put(("fstatus", idx, "ok", outn, os.path.basename(dest)))
+                            else:
+                                self._q_fail(idx, err or ("HTTP %s" % status))
+                        except Exception as e2:
+                            self._q_fail(idx, str(e2))
+                    else:
+                        self._q_fail(idx, err or ("HTTP %s" % status))
+                time.sleep(0.4)
+        except Exception as e:
+            self.q.put(("fatal", "Lỗi in PDF: %s" % e))
 
     def _write_result(self, idx, data):
         m, label, inv, exp, mode = self._task_inv[idx]

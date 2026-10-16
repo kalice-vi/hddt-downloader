@@ -17,3 +17,5 @@ secret.mem
 # Log / tạm
 *.log
 _install_log.txt
+nul
+*.bak
