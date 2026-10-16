@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+
+# Môi trường / thư viện (141MB — máy mới tự cài qua hddt.bat)
+.venv/
+
+# Profile Chromium của app (chứa phiên đăng nhập — KHÔNG đưa lên git)
+pw_profile/
+
+# Dữ liệu đăng nhập mã hóa DPAPI (riêng từng máy)
+secret.mem
+
+# uv downloaded runtime
+.uv/
+
+# Log / tạm
+*.log
+_install_log.txt
