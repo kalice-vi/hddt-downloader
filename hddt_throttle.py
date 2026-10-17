@@ -17,12 +17,14 @@ import time
 
 
 class Throttle:
-    # XML / export phase (khớp VBA GDT_XML_*)
-    MAX_CONCURRENCY = 6
-    CONCURRENCY = 6
-    INTERVAL_MS = 300
-    # JSON phase (khớp GDT_JSON_*)
-    JSON_CONCURRENCY = 4
+    # XML / export phase — 8 conn, nhịp gửi req 0.4–0.5s (giữ đúng logic fire-and-forget
+    # gốc: cứ 0.4–0.5s gửi 1 req, không chờ req trước tải/xử lý xong). Governor 429 chỉ
+    # TĂNG nhịp khi bị chặn, không bao giờ hạ xuống dưới mức này.
+    MAX_CONCURRENCY = 8
+    CONCURRENCY = 8
+    INTERVAL_MS = 450
+    # JSON phase (danh sách chi tiết / in PDF)
+    JSON_CONCURRENCY = 8
     JSON_BUFFER = 12
 
     MAX_INTERVAL_MS = 5000
@@ -111,8 +113,8 @@ if __name__ == "__main__":
     T = Throttle
     th = Throttle()
     print("cấu hình mặc định:", th.status(), "->",
-          "PASS" if (th.current_concurrency == 6 and th.current_interval_ms == 300) else "FAIL")
-    ok = ok and th.current_concurrency == 6 and th.current_interval_ms == 300
+          "PASS" if (th.current_concurrency == 8 and th.current_interval_ms == 450) else "FAIL")
+    ok = ok and th.current_concurrency == 8 and th.current_interval_ms == 450
 
     # can_start theo cờ activeCount và next_start
     th = Throttle(3, 300)
